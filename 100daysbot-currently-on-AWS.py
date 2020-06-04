@@ -9,20 +9,22 @@ import account # account.py: file containing the access tokens etc (also hashtag
 def lambda_handler(event, context):
     api = setup_tweepy_with_account()
     follow_followers(api)
-    #tweet_stuff(api)
-    check_mentions(api, ["#100DaysofDH"])
-    retweet_100daysHashtag(api)
+
+    print("Current time is: " + str(datetime.datetime.now().hour))
 
     if datetime.datetime.now().hour < 9:
         api.update_status(status=weekday_prompt())
         # with the AWS CloudWatch trigger like it is set, this event should happen
         # once per day in the morning
+    #tweet_stuff(api)
+    like_replies_to_my_posts(api)
+    check_mentions(api, ["#100DaysofDH"])
+    retweet_100daysHashtag(api)
+
+    # TODO retweeting secondary hashtags
+
 
     # TODO retweet in different ways if secondary hashtags are present
-    # TODO use trailing_hashtags?
-    # primary_hashtags
-    # secondary_hashtags
-    # users_to_follow listener
 
     return {
         'statusCode': 200,
@@ -49,12 +51,19 @@ def follow_followers(api):
 # mentions listener adapted from: https://realpython.com/twitter-bot-python-tweepy/
 def check_mentions(api, keywords):
     for tweet in tweepy.Cursor(api.mentions_timeline).items():
-        if any(keyword in tweet.text.lower() for keyword in keywords):
+        if tweet.retweeted: # stops bot from answering more than once
+            return
+        # This will only answer if you both mention 100DaysofDH and have the hashtag...
+        # that's maybe a weird logic... change later TODO
+        if any(keyword.lower() in tweet.text.lower() for keyword in keywords):
             if not tweet.user.following:
                 tweet.user.follow()
-
-            api.update_status(status=random.choice(account.mention_replies),
-                              in_reply_to_status_id=tweet.id)
+            msg = random.choice(account.mention_replies) + ' @' + tweet.user.screen_name
+            api.update_status(status=msg,
+                              in_reply_to_status_id=tweet.id,
+                              auto_populate_reply_metadata=True,
+                              in_reply_to_screen_name=tweet.user.screen_name)
+            tweet.retweet()
         if tweet.in_reply_to_status_id is not None and \
         not tweet.favorited: # its a reply
             tweet.favorite()
@@ -69,16 +78,20 @@ def retweet_100daysHashtag(api):
     # adapted from https://dototot.com/reply-tweets-python-tweepy-twitter-bot/
     twts = api.search(q="100DaysofDH") # q=Search-Phrase
 
+    for tweet in twts:
+        if tweet.retweeted or tweet.user in api.blocks():
+            return
+
     #list of specific strings we want to check for in Tweets
     t = ['#100daysofDH', '100DaysofDH', '#100Daysofdh', account.main_hashtag]
 
     for s in twts:
-        if s.retweeted:
+        if s.retweeted or s.user in api.blocks():
             return
         if not s.retweeted:
             s.retweet()
         for i in t:
-            if i == s.text:
+            if i == s.text: # exakt match, not contains --> TODO
                 sn = s.user.screen_name
                 m = "Hello @%s!" % (sn)
                 msg = m + random.choice(account.mention_replies)
@@ -102,3 +115,41 @@ def weekday_prompt():
     return random.choice(account.week[today])
     # check if there already was a #DHchallengeprompt today
     # might become necessary if the AWS Lambda Event Watch were changed
+
+
+#-------------------------------------------------------------------------------
+# TODO kind of seems to work...
+def like_replies_to_my_posts(api):
+    # only checks the first page of own account's user timeline!
+    me = api.get_user(account.current_user)
+    replies = []
+    end_of_a_thread_on_my_timeline = []
+    # adapted from: https://stackoverflow.com/questions/31497631/tweepy-twitter-get-all-tweet-replies-of-particular-user/31500076
+    # Find the end of a thread
+    for page in tweepy.Cursor(api.user_timeline).pages(1):
+        for item in page:
+            if not item.in_reply_to_user_id_str == None:
+                end_of_a_thread_on_my_timeline.append(item)
+
+    # Loop until the original tweet
+    for last_tweet in end_of_a_thread_on_my_timeline:
+        while True:
+            prev_tweet = api.get_status(last_tweet.in_reply_to_status_id_str)
+            last_tweet = prev_tweet
+            if not last_tweet.in_reply_to_status_id_str:
+                start_of_thread = last_tweet
+                break
+            else:
+               replies.append(last_tweet)
+        if not start_of_thread.user == me:
+            replies.clear()
+            break # it was not a thread of mine
+        else:
+            for reply in replies:
+                if not reply.user == me and \
+                not reply.favorited:
+                    reply.favorite()
+
+#-------------------------------------------------------------------------------
+# TODO retweeting secondary hashtags
+    
